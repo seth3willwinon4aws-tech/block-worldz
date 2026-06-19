@@ -305,7 +305,6 @@
         <button class="friendsBtn" id="onlineBtn">🟢 Online</button>
         <button class="friendsBtn" id="friendsBtn">Friends <span class="badge" id="friendCount">0</span></button>
         <button class="meBtn" id="meBtn"><span class="av" id="meAvatar"></span><span id="meName">You</span></button>
-        <button class="friendsBtn" id="debugBtn" title="Local debug tools">🛠 Debug</button>
         <button class="friendsBtn" id="settingsBtn">⚙️</button>
         <button class="friendsBtn" id="logoutBtn">Log out</button>
       </div>
@@ -323,12 +322,6 @@
     <div id="custBody"></div>
     <p class="autherr" id="custErr" style="margin:-4px 0 6px"></p>
     <div class="btns"><button class="btn ghost" id="custCancel">Close</button><button class="btn primary" id="custSave">Save</button></div>
-  </div></div>
-
-  <div class="modal" id="debugModal"><div class="sheet">
-    <h2>🛠 Debug tools</h2><p class="sub">Local-only — only affects accounts saved in this browser.</p>
-    <div id="debugBody"></div>
-    <div class="btns"><button class="btn ghost" id="debugClose">Close</button></div>
   </div></div>
 
   <div class="modal" id="friendsModal"><div class="sheet">
@@ -366,11 +359,12 @@
 
   <div class="modal" id="mpModal"><div class="sheet">
     <h2>Online play</h2>
-    <p class="sub">Players in the same game appear in your world, moving in real time. Open this page in a second tab to see it instantly.</p>
-    <div class="row"><label>Realtime server (optional)</label>
+    <p class="sub" id="mpAuto">Checking connection…</p>
+    <p class="sub" style="margin:0 0 8px">Players in the same game appear in your world and move in real time — across different devices, not just browser tabs.</p>
+    <div class="row"><label>Custom relay (optional, advanced)</label>
       <input class="nameInput" id="mpUrl" placeholder="wss://your-server.example" autocapitalize="off" spellcheck="false">
       <p class="decalnote" id="mpStatus"></p></div>
-    <p class="sub" style="margin:0 0 8px">Without a server, multiplayer is same-device only (synced across browser tabs). To play across the internet, run this tiny relay and paste its address above:</p>
+    <p class="sub" style="margin:0 0 8px">Only needed if you want to route multiplayer through your own server instead. Otherwise leave this blank — paste an address below and hit Connect to use it:</p>
     <pre class="code" id="mpServer"></pre>
     <div class="btns"><button class="btn ghost" id="mpClose">Close</button><button class="btn primary" id="mpConnect">Connect</button></div>
   </div></div>
@@ -449,11 +443,25 @@
   const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 
+  /* ---- seeded world RNG: same game id => same world for every player, every time.
+     (uid() above stays on real Math.random — only world *generation* needs to be shared.) ---- */
+  function hashSeed(str){ let h=2166136261; str=String(str||'default');
+    for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
+  function makeRng(seed){ let s=seed>>>0;
+    return function(){ s|=0; s=(s+0x6D2B79F5)|0; let t=Math.imul(s^(s>>>15),1|s);
+      t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+  let worldRng=Math.random;
+  function seedWorld(id){ worldRng=makeRng(hashSeed(id)); }
+
   /* ---- storage (persists in a real tab, falls back to memory in sandbox) ---- */
   const mem={};
   const store={
     get(k,d){ try{const v=localStorage.getItem(k);return v?JSON.parse(v):(k in mem?mem[k]:d);}catch(e){return k in mem?mem[k]:d;} },
-    set(k,v){ mem[k]=v; try{localStorage.setItem(k,JSON.stringify(v));}catch(e){} }
+    set(k,v){ mem[k]=v; try{localStorage.setItem(k,JSON.stringify(v));}catch(e){} },
+    keys(prefix){ const out=new Set();
+      try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.startsWith(prefix))out.add(k); } }catch(e){}
+      Object.keys(mem).forEach(k=>{ if(k.startsWith(prefix))out.add(k); });
+      return [...out]; }
   };
 
   /* ---- palettes ---- */
@@ -469,23 +477,14 @@
   let savePublished=()=>store.set(uk('bw_published'),published);
   let saveUserMarket=()=>store.set(uk('bw_market'),userMarket);
   function defaultProfile(name){return {name:name,skin:0xffcb8e,shirt:0xe8553e,legs:0x3554a0,hat:{type:'none',color:0xffd33d},decal:{kind:'none',value:null},accessory:null,cubits:100,owned:[],playMs:0,earnedChunks:0};}
-  // find the real account key matching a username, ignoring case
-  function findAccountKey(accs,u){const lu=u.toLowerCase();return Object.keys(accs).find(k=>k.toLowerCase()===lu);}
-  // is this display name already used by another account's profile? (case-insensitive)
+  // is this display name already used by another account's profile? (case-insensitive, scans accounts cached on this device)
   function nameTakenByOther(name,excludeUser){
     const ln=name.trim().toLowerCase(); if(!ln)return false;
     if(excludeUser!=='guest' && ln==='guest' && currentUser!=='guest')return true;
-    const accs=store.get('bw_accounts',{});
-    for(const acc of Object.keys(accs)){
-      if(acc===excludeUser)continue;
-      const p=store.get('bw_profile__'+acc,null);
-      const pname=(p&&p.name)?p.name:acc;
+    for(const k of store.keys('bw_profile__')){
+      const acc=k.slice('bw_profile__'.length); if(acc===excludeUser)continue;
+      const p=store.get(k,null); const pname=(p&&p.name)?p.name:acc;
       if(pname.trim().toLowerCase()===ln)return true;
-    }
-    if(excludeUser!=='guest'){
-      const gp=store.get('bw_profile__guest',null);
-      const gname=(gp&&gp.name)?gp.name:'guest';
-      if(gname.trim().toLowerCase()===ln)return true;
     }
     return false;
   }
@@ -649,7 +648,7 @@
   const H={r:0.55,vy:0,grounded:false,faceY:Math.PI,walkPhase:0};
   const SPEED=7.2,JUMP=9.5,GRAV=20,STEP=0.65;
   let boxes=[],coins=[],groundFn=()=>0,spawn=new THREE.Vector3(),state='menu',current=null,collected=0,onWin=null,won=false;
-  let obbyCheckpoints=[],obbyGoalX=0,obbyGoalZ=0,obbyGoalY=0,obbyStartTime=0;
+  let obbyCheckpoints=[],obbyGoalX=0,obbyGoalZ=0,obbyGoalY=0,obbyStartTime=0,scriptStartTime=0;
 
   function renderCheckpointHUD(){
     const hud=document.getElementById('checkpointHUD'),dots=document.getElementById('cpDots');
@@ -699,11 +698,11 @@
     const by=terrainTop(8,-4);
     for(let i=0;i<4;i++)addBox(8+i*1.6,-4,1.6,3,by,by+0.6*(i+1),0xe0b15a,true);
     addBox(8+4*1.6+1.4,-4,4,4,by,by+2.6,0xe8553e,true);
-    [[-9,6],[-12,3],[-6,9],[6,9],[12,-9],[-3,-12]].forEach(([x,z])=>{const g=terrainTop(x,z);addBox(x,z,2.2,2.2,g,g+0.9+Math.random(),0x3554a0,true);});
-    for(let i=0;i<22;i++){const a=Math.random()*6.28,r=8+Math.random()*(R*TILE-10),x=Math.cos(a)*r,z=Math.sin(a)*r;if(Math.hypot(x,z)<6)continue;
+    [[-9,6],[-12,3],[-6,9],[6,9],[12,-9],[-3,-12]].forEach(([x,z])=>{const g=terrainTop(x,z);addBox(x,z,2.2,2.2,g,g+0.9+worldRng(),0x3554a0,true);});
+    for(let i=0;i<22;i++){const a=worldRng()*6.28,r=8+worldRng()*(R*TILE-10),x=Math.cos(a)*r,z=Math.sin(a)*r;if(Math.hypot(x,z)<6)continue;
       const g=terrainTop(x,z);addBox(x,z,0.8,0.8,g,g+2.2,0x7a4a24,true);
       const lf=new THREE.Mesh(new THREE.BoxGeometry(2.6,2.4,2.6),new THREE.MeshLambertMaterial({color:0x3f8f3a}));lf.position.set(x,g+3.4,z);lf.castShadow=lf.receiveShadow=true;world.add(lf);}
-    for(let i=0;i<14;i++){const a=Math.random()*6.28,r=6+Math.random()*(R*TILE-12),x=Math.cos(a)*r,z=Math.sin(a)*r;addCoin(x,z,terrainTop(x,z)+1.1);}
+    for(let i=0;i<14;i++){const a=worldRng()*6.28,r=6+worldRng()*(R*TILE-12),x=Math.cos(a)*r,z=Math.sin(a)*r;addCoin(x,z,terrainTop(x,z)+1.1);}
     coinT.textContent=coins.length;
   }
   function buildObby(){
@@ -714,8 +713,8 @@
     addBox(0,0,4,4,-1,0,0x2e9e6b,true); spawn.set(0,0,0);
     // checkpoints every 4 platforms
     obbyCheckpoints=[{x:0,y:0,z:0,hit:true}];
-    for(let i=1;i<=12;i++){const ang=i*0.9,step=3.0+Math.random();x+=Math.cos(ang)*step+(Math.random()-.5)*2;z+=Math.sin(ang)*step;y+=1.2+(i%3===0?0.7:0);
-      const sz=2.6+(Math.random()<.3?0.8:0);addBox(x,z,sz,sz,y-1,y,cols[i%cols.length],true);
+    for(let i=1;i<=12;i++){const ang=i*0.9,step=3.0+worldRng();x+=Math.cos(ang)*step+(worldRng()-.5)*2;z+=Math.sin(ang)*step;y+=1.2+(i%3===0?0.7:0);
+      const sz=2.6+(worldRng()<.3?0.8:0);addBox(x,z,sz,sz,y-1,y,cols[i%cols.length],true);
       if(i%4===0)obbyCheckpoints.push({x,y,z,hit:false});}
     x+=2.6;y+=1.0; addBox(x,z,4,4,y-1,y,0xffd33d,true);
     const pole=new THREE.Mesh(new THREE.BoxGeometry(0.18,3,0.18),new THREE.MeshLambertMaterial({color:0x7a4a24}));pole.position.set(x,y+1.5,z);pole.castShadow=true;world.add(pole);
@@ -826,7 +825,7 @@
 
   function enterGame(o){
     clearWorld(); clearRemotes(); studio=!!o.studio; studioEditingId=o.editId||null;
-    o.build();
+    seedWorld(o.id); o.build();
     hero.position.copy(spawn);hero.rotation.set(0,Math.PI,0);H.vy=0;H.grounded=false;H.faceY=Math.PI;
     cam.yaw=Math.PI;cam.pitch=0.42;cam.dist=9; state='game';current=o.id;won=false;collected=0;
     ui.menu.style.display='none'; document.body.classList.add('in-game');
@@ -835,7 +834,7 @@
     ui.objective.style.display='block'; ui.objective.style.opacity='1'; ui.objText.textContent=o.objective;
     ui.coins.style.display=coins.length?'block':'none'; if(coins.length){coinT.textContent=coins.length;ui.coinN.textContent='0';}
     ui.studioBar.style.display=o.studio?'flex':'none';
-    net.setGame(o.id);
+    net.setGame(o.studio?null:o.id); // Studio is your private build canvas — never a shared presence room
     hideObjLater();
   }
   function startBuiltin(id){const g=GAMES[id];
@@ -969,65 +968,6 @@
     profile=Object.assign(profile,custDraft);if(!profile.hat)profile.hat={type:'none',color:0xffd33d};
     saveProfile();applyAvatar();updateAccountUI();renderMenu();closeModal('custModal');}
 
-  /* ---- debug panel: local accounts only ---- */
-  function listLocalAccounts(){
-    const accs=store.get('bw_accounts',{});
-    const names=Object.keys(accs).concat(['guest']);
-    return names.map(acc=>{
-      const p=store.get('bw_profile__'+acc,null);
-      return {user:acc, displayName:(p&&p.name)?p.name:acc, cubits:(p&&p.cubits!=null)?p.cubits:100, isCurrent:acc===currentUser};
-    });
-  }
-  function debugSetCubits(user,amount){
-    const amt=Math.max(0,Math.floor(amount)||0);
-    const p=store.get('bw_profile__'+user,null)||defaultProfile(user);
-    p.cubits=amt; store.set('bw_profile__'+user,p);
-    if(user===currentUser){profile.cubits=amt;saveProfile();updateAccountUI();renderMenu();}
-  }
-  function debugTransfer(fromUser,toUser,amount){
-    const amt=Math.max(0,Math.floor(amount)||0); if(!amt)return;
-    const fp=store.get('bw_profile__'+fromUser,null)||defaultProfile(fromUser);
-    const tp=store.get('bw_profile__'+toUser,null)||defaultProfile(toUser);
-    fp.cubits=Math.max(0,(fp.cubits|0)-amt); tp.cubits=(tp.cubits|0)+amt;
-    store.set('bw_profile__'+fromUser,fp); store.set('bw_profile__'+toUser,tp);
-    if(fromUser===currentUser){profile.cubits=fp.cubits;saveProfile();}
-    if(toUser===currentUser){profile.cubits=tp.cubits;saveProfile();}
-    updateAccountUI();renderMenu();
-  }
-  function buildDebugPanel(){
-    const body=document.getElementById('debugBody');
-    const accounts=listLocalAccounts();
-    body.innerHTML = accounts.map(a=>`
-      <div class="row" style="border:1px solid #e3e9ef;border-radius:12px;padding:10px 12px;margin-bottom:10px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <b style="font-size:14px">${esc(a.displayName)}</b>
-          <span style="font-size:12px;color:#7a8a99">(${esc(a.user)})</span>
-          ${a.isCurrent?'<span class="badge" style="margin-left:auto">Current</span>':''}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span class="cubits" style="padding:5px 10px;font-size:13px">◈ <b>${a.cubits|0}</b></span>
-          <input class="pinput" type="number" min="0" placeholder="amount" id="dbAmt_${esc(a.user)}" style="width:90px">
-          <button class="mini-btn" data-set="${esc(a.user)}">Set</button>
-          <button class="mini-btn" data-give="${esc(a.user)}">+ Give</button>
-          ${accounts.length>1?`<select class="pinput" id="dbTo_${esc(a.user)}" style="width:auto">
-            ${accounts.filter(o=>o.user!==a.user).map(o=>`<option value="${esc(o.user)}">→ ${esc(o.displayName)}</option>`).join('')}
-          </select><button class="mini-btn" data-send="${esc(a.user)}">Send</button>`:''}
-        </div>
-      </div>`).join('');
-    body.querySelectorAll('[data-set]').forEach(b=>b.onclick=()=>{
-      const u=b.dataset.set, v=parseInt(document.getElementById('dbAmt_'+u).value);
-      debugSetCubits(u,isNaN(v)?0:v); buildDebugPanel(); toast('Set cubits for '+u);});
-    body.querySelectorAll('[data-give]').forEach(b=>b.onclick=()=>{
-      const u=b.dataset.give, v=parseInt(document.getElementById('dbAmt_'+u).value)||0;
-      const p=store.get('bw_profile__'+u,null)||defaultProfile(u);
-      debugSetCubits(u,(p.cubits|0)+v); buildDebugPanel(); toast('Gave '+v+' cubits to '+u);});
-    body.querySelectorAll('[data-send]').forEach(b=>b.onclick=()=>{
-      const u=b.dataset.send, to=document.getElementById('dbTo_'+u).value, v=parseInt(document.getElementById('dbAmt_'+u).value)||0;
-      debugTransfer(u,to,v); buildDebugPanel(); toast('Sent '+v+' cubits to '+to);});
-  }
-  document.getElementById('debugBtn').onclick=()=>{buildDebugPanel();openModal('debugModal');};
-  document.getElementById('debugClose').onclick=()=>closeModal('debugModal');
-
   // friends
   function friendRow(f,mode){
     const st=f.online&&f.playing?`<span class="st"><span class="dotg on"></span>Playing ${esc(f.playing)}</span>`
@@ -1057,11 +997,12 @@
       const name=reqInput.value.trim();const note=document.getElementById('friendReqNote');
       if(name.length<2){note.textContent='Enter a username (2+ chars).';return;}
       if(friends.some(f=>f.name===name)){note.textContent='Already your friend!';return;}
-      const accs=store.get('bw_accounts',{});
-      if(!accs[name]&&name!=='guest'){note.textContent='No account found with that name.';return;}
+      const lname=name.toLowerCase();
+      const exists = lname==='guest' || !!store.get('bw_profile__'+lname,null);
+      if(!exists){note.textContent='No account found with that name on this device — friend requests currently only work between accounts that have signed in on this browser.';return;}
       // store req for that user
-      const theirReqs=store.get('bw_friend_reqs__'+name,[]);
-      if(!theirReqs.includes(profile.name)){theirReqs.push(profile.name);store.set('bw_friend_reqs__'+name,theirReqs);}
+      const theirReqs=store.get('bw_friend_reqs__'+lname,[]);
+      if(!theirReqs.includes(profile.name)){theirReqs.push(profile.name);store.set('bw_friend_reqs__'+lname,theirReqs);}
       note.textContent='Request sent to '+name+'!'; reqInput.value='';};
   }
 
@@ -1257,7 +1198,11 @@
     const dx=hero.position.x-c.x,dz=hero.position.z-c.z,dyy=hero.position.y+1-c.mesh.position.y;
     if(dx*dx+dz*dz<1.2&&Math.abs(dyy)<1.7){c.got=true;c.mesh.visible=false;collected++;ui.coinN.textContent=collected;
       if(collected===coins.length){showObj('All coins collected! ★');saveScore('explorer',collected);}}}}
-  function checkWin(){if(!onWin||won)return;if(onWin()){won=true;showObj('🎉 You reached the top!');}}
+  function checkWin(){if(!onWin||won)return;if(onWin()){won=true;showObj('🎉 You reached the top!');
+    if(current&&current.startsWith('cm_')&&LB_GAMES.some(g=>g.id===current)){
+      const secs=Math.round((performance.now()-scriptStartTime)/1000); saveScore(current,Math.max(0,999-secs));
+    }
+  }}
   function checkCheckpoints(){if(current==='obby'&&obbyCheckpoints.length)updateCheckpoints();}
   const clock=new THREE.Clock();
   function tick(){requestAnimationFrame(tick);const dt=Math.min(clock.getDelta(),0.05),t=clock.elapsedTime;
@@ -1278,6 +1223,8 @@
   let scriptUpdate=null, pendingPublish=null, studioScript='';
   const remoteGroup=new THREE.Group(); scene.add(remoteGroup);
   const remotes=new Map(); const NET_ID=uid(); let netGame=null;
+  let sb=null, sbStatus='connecting'; // Supabase Realtime client — the actual cross-device transport
+  function safeTopic(s){ return 'bw-room-'+String(s||'x').replace(/[^a-zA-Z0-9_-]/g,'_'); }
 
   function rbox(w,h,d,m,x,y,z){const me=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);me.position.set(x,y,z);me.castShadow=true;return me;}
   function makeAvatar(look){
@@ -1299,8 +1246,41 @@
     sp.scale.set(2.1,0.52,1);sp.position.y=3.8;return sp;
   }
   const myLook=()=>({skin:profile.skin,shirt:profile.shirt,legs:profile.legs,hat:profile.hat,accessory:profile.accessory});
-  const net={ ch:null, ws:null,
-    start(){ try{ this.ch=new BroadcastChannel('blockworld_net'); this.ch.onmessage=e=>onNet(e.data); }catch(e){} },
+
+  /* Cross-device transport: this project's own Supabase Realtime (no setup needed beyond the
+     SUPABASE_ANON_KEY env var already sitting next to your other Supabase keys). Pulls the public
+     url/anon key from a tiny Netlify function, then opens a broadcast channel per game-id room. */
+  async function initRealtime(){
+    try{
+      const cfg=await fetch('/.netlify/functions/config').then(r=>r.json());
+      if(!cfg||!cfg.url||!cfg.anonKey){ sbStatus='unconfigured'; console.warn('[multiplayer] SUPABASE_ANON_KEY not set — cross-device play is off.'); return; }
+      const mod=await import('https://esm.sh/@supabase/supabase-js@2');
+      sb=mod.createClient(cfg.url,cfg.anonKey,{realtime:{params:{eventsPerSecond:20}}});
+      sbStatus='ready'; console.log('[multiplayer] Realtime client ready.');
+      if(netGame)net.setGame(netGame); // pick up the room if a game was already entered while this loaded
+    }catch(e){ sb=null; sbStatus='error'; console.warn('[multiplayer] could not init Realtime:',e); }
+  }
+  // Opens (or re-opens) the broadcast room for a game id. If the channel ever errors, times out,
+  // or closes — a dropped socket, a brief network blip, anything — it was previously left dark
+  // forever for that session. Now it watches its own status and rejoins automatically.
+  function openRoom(g){
+    if(!sb||!g)return null;
+    const ch=sb.channel(safeTopic(g),{config:{broadcast:{self:false}}});
+    ['pos','emote','leave'].forEach(evt=>ch.on('broadcast',{event:evt},({payload})=>onNet(payload)));
+    ch.subscribe(status=>{
+      console.log('[multiplayer] room',g,'→',status);
+      if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED'){
+        if(net.channel!==ch||netGame!==g)return; // a newer channel/room has already taken over — ignore this stale one
+        try{ sb.removeChannel(ch); }catch(e){}
+        net.channel=null;
+        setTimeout(()=>{ if(netGame===g&&!net.channel){ console.log('[multiplayer] reconnecting room',g,'…'); net.channel=openRoom(g); } },1200);
+      }
+    });
+    return ch;
+  }
+  const net={ ch:null, ws:null, channel:null,
+    start(){ try{ this.ch=new BroadcastChannel('blockworld_net'); this.ch.onmessage=e=>onNet(e.data); }catch(e){}
+      initRealtime(); },
     setServer(url){ try{ if(this.ws){this.ws.close();this.ws=null;} if(!url)return;
       this.ws=new WebSocket(url);
       const st=document.getElementById('mpStatus'); if(st)st.textContent='Connecting…';
@@ -1310,26 +1290,32 @@
       this.ws.onerror=()=>{const s=document.getElementById('mpStatus');if(s)s.textContent='Could not connect to that server.';};
     }catch(e){} },
     send(o){ o.from=NET_ID; const j=JSON.stringify(o);
-      if(this.ws&&this.ws.readyState===1)this.ws.send(j); if(this.ch)try{this.ch.postMessage(o);}catch(e){} },
-    setGame(g){ if(netGame&&netGame!==g)this.send({t:'leave',id:NET_ID}); netGame=g; clearRemotes(); updateOnlineCount(); }
+      if(this.ws&&this.ws.readyState===1)this.ws.send(j);
+      if(this.ch)try{this.ch.postMessage(o);}catch(e){}
+      if(this.channel)try{this.channel.send({type:'broadcast',event:o.t||'msg',payload:o});}catch(e){} },
+    setGame(g){ if(netGame&&netGame!==g)this.send({t:'leave',id:NET_ID});
+      if(this.channel){ try{ sb&&sb.removeChannel(this.channel); }catch(e){} this.channel=null; }
+      netGame=g; clearRemotes(); updateOnlineCount();
+      if(g&&sb) this.channel=openRoom(g); }
   };
   let lastSend=0;
   function netFrame(){ const now=performance.now();
     if(netGame && now-lastSend>90){ lastSend=now;
       net.send({t:'pos',id:NET_ID,name:profile?profile.name:'Player',look:myLook(),game:netGame,
         x:hero.position.x,y:hero.position.y,z:hero.position.z,ry:hero.rotation.y}); }
-    const cut=now-2500;
-    remotes.forEach((r,id)=>{ if(r.lastSeen<cut){remoteGroup.remove(r.group);remotes.delete(id);}
+    const cut=now-4000; // forgiving window — survives a brief reconnect blip without anyone visibly popping out
+    remotes.forEach((r,id)=>{ if(r.lastSeen<cut){remoteGroup.remove(r.group);remotes.delete(id);console.log('[multiplayer] timed out (no updates for 4s):',id);}
       else{ r.group.position.x+=(r.t.x-r.group.position.x)*0.25; r.group.position.y+=(r.t.y-r.group.position.y)*0.25; r.group.position.z+=(r.t.z-r.group.position.z)*0.25;
         let d=r.t.ry-r.group.rotation.y; while(d>Math.PI)d-=6.2832; while(d<-Math.PI)d+=6.2832; r.group.rotation.y+=d*0.25; } });
     updateOnlineCount();
   }
   function onNet(m){ if(!m||m.from===NET_ID)return;
-    if(m.t==='leave'){ const r=remotes.get(m.id); if(r){remoteGroup.remove(r.group);remotes.delete(m.id);} updateOnlineCount(); return; }
+    if(m.t==='leave'){ const r=remotes.get(m.id); if(r){remoteGroup.remove(r.group);remotes.delete(m.id);console.log('[multiplayer] left:',m.id);} updateOnlineCount(); return; }
     if(m.t==='emote'){ if(netGame&&m.game===netGame){ const r=remotes.get(m.id); if(r)showBubble(r.group,m.emoji); } return; }
     if(m.t==='pos'){ if(!netGame||m.game!==netGame){ const r=remotes.get(m.id); if(r){remoteGroup.remove(r.group);remotes.delete(m.id);} return; }
       let r=remotes.get(m.id);
-      if(!r){ const g=makeAvatar(m.look||{skin:0xffcb8e,shirt:0xe8553e,legs:0x3554a0}); g.add(makeLabel(m.name||'Player')); g.position.set(m.x,m.y,m.z);
+      if(!r){ console.log('[multiplayer] new player:',m.name,m.id);
+        const g=makeAvatar(m.look||{skin:0xffcb8e,shirt:0xe8553e,legs:0x3554a0}); g.add(makeLabel(m.name||'Player')); g.position.set(m.x,m.y,m.z);
         remoteGroup.add(g); r={group:g,t:{x:m.x,y:m.y,z:m.z,ry:m.ry||0},lastSeen:performance.now()}; remotes.set(m.id,r); }
       r.t.x=m.x;r.t.y=m.y;r.t.z=m.z;r.t.ry=m.ry||0;r.lastSeen=performance.now();
     }
@@ -1356,7 +1342,7 @@
       onUpdate(fn){ scriptUpdate=fn; },
       say(t){ showObj(String(t)); },
       me(){ return {x:hero.position.x,y:hero.position.y,z:hero.position.z}; },
-      rand(a,b){ return a+Math.random()*(b-a); }
+      rand(a,b){ return a+worldRng()*(b-a); }
     };
   }
   function runScript(code){ scriptUpdate=null;
@@ -1364,9 +1350,9 @@
     catch(e){ showObj('Script error: '+e.message); }
   }
   function buildScriptGame(rec){ scene.background=new THREE.Color(0xdfeefc); scene.fog=new THREE.Fog(0xdfeefc,60,170);
-    groundFn=()=>0; spawn.set(0,0,0); runScript(rec.script); }
+    groundFn=()=>0; spawn.set(0,0,0); scriptStartTime=performance.now(); runScript(rec.script); }
   function buildGameRec(rec){ if(rec.script) buildScriptGame(rec); else buildPublished(rec); }
-  function playCommunity(rec){ enterGame({id:'cm_'+(rec.id||uid()),name:rec.name,objective:'Community · by '+(rec.author||'community'),build:()=>buildGameRec(rec)}); }
+  function playCommunity(rec){ enterGame({id:rec.id||('cm_'+uid()),name:rec.name,objective:'Community · by '+(rec.author||'community'),build:()=>buildGameRec(rec)}); }
 
   /* a few games that ship with the platform */
   const COMMUNITY=[
@@ -1444,11 +1430,20 @@
 "});\n"+
 "console.log('Blockworld relay on ws://localhost:8080');";
   function openMP(){ document.getElementById('mpServer').textContent=MP_SERVER;
-    document.getElementById('mpUrl').value=store.get('bw_server','')||''; openModal('mpModal'); }
+    document.getElementById('mpUrl').value=store.get('bw_server','')||'';
+    const a=document.getElementById('mpAuto');
+    a.textContent = sbStatus==='ready' ? '✅ Connected — multiplayer works automatically, across devices, no setup needed.'
+      : sbStatus==='unconfigured' ? '⚠️ Not configured yet — add SUPABASE_ANON_KEY to your Netlify env vars (Supabase dashboard → Settings → API → anon public key) to turn this on. Until then, multiplayer only syncs across tabs on this device.'
+      : sbStatus==='error' ? '⚠️ Could not connect — multiplayer is using same-device mode only for now.'
+      : 'Connecting…';
+    openModal('mpModal'); }
   document.getElementById('onlineBtn').onclick=openMP;
   document.getElementById('mpClose').onclick=()=>closeModal('mpModal');
   document.getElementById('mpConnect').onclick=()=>{ const url=document.getElementById('mpUrl').value.trim();
-    store.set('bw_server',url); net.setServer(url); if(!url)document.getElementById('mpStatus').textContent='Cleared — using same-device (tabs) mode.'; };
+    store.set('bw_server',url); net.setServer(url); if(!url)document.getElementById('mpStatus').textContent='Cleared — back to the default (automatic) transport.'; };
+
+  // best-effort presence cleanup if the tab is closed/navigated away mid-game
+  addEventListener('pagehide',()=>{ if(netGame)net.send({t:'leave',id:NET_ID}); });
 
   // start networking now (cross-tab); reconnect to a saved server if any
   net.start(); const _srv=store.get('bw_server',''); if(_srv) net.setServer(_srv);
@@ -1767,12 +1762,14 @@
         // Try to refresh from server; fall back to local cache if offline
         try {
           const profileRes = await API.loadProfile();
-          if (profileRes.error) { showLogin(); }
-          else { await enterApp(sess, profileRes); }
+          if (profileRes.error) {
+            // Token rejected (expired or invalid) — clear it and ask to log back in
+            store.set('bw_token', null); store.set('bw_session', null);
+            showLogin(); toast('Your session expired — please log in again.');
+          } else { await enterApp(sess, profileRes); }
         } catch {
-          // offline or server not configured — use localStorage cache
-          const accs = store.get('bw_accounts', {});
-          if (findAccountKey(accs, sess)) await enterApp(sess);
+          // network/server unreachable — fall back to this device's cached profile, if any
+          if (store.get('bw_profile__'+sess, null)) await enterApp(sess);
           else showLogin();
         }
       } else {
